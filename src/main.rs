@@ -88,12 +88,12 @@ impl toybox::App for App {
 						painter.rect_filled(pan_rect, rounding, egui::Color32::DARK_GRAY);
 						painter.rect_filled(scaled_pan_rect, rounding, egui::Color32::GRAY);
 
-						// painter.rect_stroke(rect, outer_rounding, egui::Stroke::new(2.0, stroke_color));
+						let (pitch_class, octave) = midi_to_pitch_class_octave(voice.note as i32);
 
 						painter.text(
 							rect.center(),
 							egui::Align2::CENTER_CENTER,
-							format!("{}", voice.note),
+							format!("{pitch_class}{octave}"),
 							egui::FontId::proportional(18.0),
 							stroke_color
 						);
@@ -146,5 +146,63 @@ fn process_midi_event(msg: midi_msg::MidiMsg, controller: &SynthController) {
 		}
 
 		_ => {}
+	}
+}
+
+
+fn midi_to_pitch_class_octave(midi: i32) -> (PitchClass, i32) {
+	(PitchClass::from_midi(midi), midi/12 - 1)
+}
+
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PitchClass {
+	C, Cs,
+	D, Ds,
+	E,
+	F, Fs,
+	G, Gs,
+	A, As,
+	B,
+}
+
+impl PitchClass {
+	pub fn from_midi(midi_note: i32) -> PitchClass {
+		match midi_note.rem_euclid(12) {
+			0 => PitchClass::C,
+			1 => PitchClass::Cs,
+			2 => PitchClass::D,
+			3 => PitchClass::Ds,
+			4 => PitchClass::E,
+			5 => PitchClass::F,
+			6 => PitchClass::Fs,
+			7 => PitchClass::G,
+			8 => PitchClass::Gs,
+			9 => PitchClass::A,
+			10 => PitchClass::As,
+			11 => PitchClass::B,
+			_ => unreachable!()
+		}
+	}
+}
+
+use std::fmt;
+
+impl fmt::Display for PitchClass {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+		match self {
+			PitchClass::C => "C".fmt(f),
+			PitchClass::Cs => "C#".fmt(f),
+			PitchClass::D => "D".fmt(f),
+			PitchClass::Ds => "D#".fmt(f),
+			PitchClass::E => "E".fmt(f),
+			PitchClass::F => "F".fmt(f),
+			PitchClass::Fs => "F#".fmt(f),
+			PitchClass::G => "G".fmt(f),
+			PitchClass::Gs => "G#".fmt(f),
+			PitchClass::A => "A".fmt(f),
+			PitchClass::As => "A#".fmt(f),
+			PitchClass::B => "B".fmt(f),
+		}
 	}
 }
