@@ -1,6 +1,7 @@
 use toybox::prelude::*;
 
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 use super::adsr::Adsr;
 
@@ -13,13 +14,29 @@ pub enum SynthMessage {
 	},
 
 	NoteOff(u8),
+
+	SetUiFeedback(Option<Arc<Mutex<UiFeedback>>>),
 }
 
+#[derive(Debug)]
+pub struct UiFeedback {
+	pub voices: Vec<UiVoice>,
+}
+
+#[derive(Debug)]
+pub struct UiVoice {
+	pub envelope: f32,
+	pub pan: f32,
+	pub note: u8,
+	pub active: bool,
+}
 
 
 pub struct SynthProvider {
 	msg_rx: Receiver<SynthMessage>,
 	voice_bank: VoiceBank,
+
+	ui_feedback: Option<Arc<Mutex<UiFeedback>>>,
 
 	sample_rate: u32,
 	channels: usize,
@@ -30,6 +47,8 @@ impl SynthProvider {
 		SynthProvider {
 			msg_rx,
 			voice_bank: VoiceBank::new(),
+
+			ui_feedback: None,
 
 			sample_rate: 44100,
 			channels: 2,
@@ -43,8 +62,31 @@ impl SynthProvider {
 			match msg {
 				NoteOff(note) => self.voice_bank.note_off(note),
 				NoteOn{note, velocity} => self.voice_bank.note_on(note, velocity),
+
+				SetUiFeedback(ui_feedback) => {
+					self.ui_feedback = ui_feedback;
+				}
 			}
 		}
+	}
+
+	fn collect_feedback(&self) {
+		let Some(mut ui_feedback) = self.ui_feedback.as_ref().and_then(|m| m.try_lock().ok()) else {
+			return;
+		};
+
+		ui_feedback.voices.clear();
+
+		for voice in self.voice_bank.voices.iter() {
+			ui_feedback.voices.push(UiVoice {
+				envelope: voice.adsr.value(),
+				pan: voice.pan * 2.0 - 1.0,
+				note: voice.note,
+				active: voice.active,
+			});
+		}
+
+		ui_feedback.voices.sort_by_key(|v| v.note);
 	}
 }
 
@@ -59,15 +101,6 @@ impl audio::Provider for SynthProvider {
 
 		assert!(self.channels == 2);
 
-		// let buffer_size = buffer.len();
-		// let sample_buffer = match self.channels {
-		// 	1 => &mut buffer[..],
-		// 	2 => &mut buffer[..buffer_size/2],
-
-		// 	n => panic!("Unsupported number of channels: {n}"),
-		// };
-
-		// Evaluate samples
 		buffer.fill(0.0);
 
 		let sample_dt = (self.sample_rate as f32).recip();
@@ -79,13 +112,7 @@ impl audio::Provider for SynthProvider {
 		}
 
 		self.voice_bank.clean_up();
-
-		// // Mono -> Stereo
-		// for idx in (0..buffer_size/2).rev() {
-		// 	let sample = buffer[idx];
-		// 	buffer[idx*2+1] = sample;
-		// 	buffer[idx*2] = sample;
-		// }
+		self.collect_feedback();
 	}
 }
 
@@ -116,7 +143,7 @@ impl VoiceBank {
 	}
 
 	fn note_on(&mut self, note: u8, velocity: u8) {
-		let gain = midi_velocity_to_gain(velocity);
+		let gain = midi_velocity_to_gain(velocity) * 0.7;
 
 		if let Some(voice) = self.voices.iter_mut().find(|v| v.note == note) {
 			voice.restart(gain);
@@ -142,9 +169,6 @@ struct Voice {
 	active: bool,
 	silence_timer: u8,
 
-	gain: f32,
-	gain_filter: BasicLP,
-
 	pan: f32,
 
 	note: u8,
@@ -154,13 +178,10 @@ impl Voice {
 	fn new(note: u8, gain: f32, pan: f32) -> Voice {
 		Voice {
 			note,
-			adsr: Adsr::new(0.03, 0.2, 0.5, 4.0),
+			adsr: Adsr::new(0.03, 0.2, 0.5, 4.0, gain),
 
 			active: true,
 			silence_timer: 0,
-
-			gain,
-			gain_filter: BasicLP::new(300.0),
 
 			pan: (pan * 0.5 + 0.5).clamp(0.0, 1.0),
 
@@ -169,7 +190,7 @@ impl Voice {
 	}
 
 	fn restart(&mut self, gain: f32) {
-		self.gain = gain;
+		self.adsr.set_gain(gain);
 		self.active = true;
 		self.silence_timer = 0;
 	}
@@ -179,29 +200,25 @@ impl Voice {
 	}
 
 	fn is_silent(&self) -> bool {
-		self.silence_timer > 4
+		self.silence_timer > 40
 	}
 
 	fn update_and_fill(&mut self, out: &mut [[f32; 2]], sample_dt: f32) {
 		let freq = midi_note_to_freq(self.note);
 		let inc = TAU * freq * sample_dt;
 
-		self.gain_filter.set_sample_dt(sample_dt);
-
 		let l_gain = (self.pan).sqrt();
 		let r_gain = (1.0 - self.pan).sqrt();
 
 		for [l_sample, r_sample] in out {
 			let env = self.adsr.advance(sample_dt, self.active);
-			let env = env * env;
 
 			let osc = self.phase.sin() * 3.0
 				+ (self.phase * 3.0).sin() * 2.0
-				+ (self.phase * 5.0).sin() * 1.0
-				+ (self.phase * 7.0).sin() * 0.0;
+				+ (self.phase * 5.0).sin() * 1.0;
 			let osc = osc / 6.0;
 
-			let sample = osc * env * self.gain_filter.evaluate(self.gain);
+			let sample = osc * env;
 
 			*l_sample += sample * l_gain;
 			*r_sample += sample * r_gain;
@@ -225,7 +242,7 @@ fn midi_note_to_freq(note: u8) -> f32 {
 }
 
 fn midi_velocity_to_gain(velocity: u8) -> f32 {
-	(velocity.min(127) as f32 / 127.0).powi(2) * 0.5
+	(velocity.min(127) as f32 / 127.0).powi(2)
 }
 
 

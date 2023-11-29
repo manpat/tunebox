@@ -11,6 +11,8 @@ pub struct Adsr {
 
 	gate: Gate,
 
+	gain_lvl: f32,
+
 	atk_inc: f32,
 	dec_inc: f32,
 	sus_lvl: f32,
@@ -18,7 +20,7 @@ pub struct Adsr {
 }
 
 impl Adsr {
-	pub fn new(atk: f32, dec: f32, sus_lvl: f32, rel: f32) -> Adsr {
+	pub fn new(atk: f32, dec: f32, sus_lvl: f32, rel: f32, gain: f32) -> Adsr {
 		let sus_lvl = sus_lvl.max(0.0).min(1.0);
 
 		Adsr {
@@ -26,6 +28,7 @@ impl Adsr {
 			position: 0.0,
 
 			gate: Gate::new(),
+			gain_lvl: gain.sqrt(),
 
 			// NOTE: this model doesn't allow decay to be cancelled on gate falling edge
 			// this may or may not be desirable but needs thought
@@ -38,6 +41,14 @@ impl Adsr {
 
 	pub fn is_silent(&self) -> bool {
 		matches!(self.state, State::Silence)
+	}
+
+	pub fn set_gain(&mut self, gain: f32) {
+		self.gain_lvl = gain.sqrt();
+	}
+
+	pub fn value(&self) -> f32 {
+		self.position
 	}
 
 	fn update(&mut self, gate: GateState, dt: f32) {
@@ -54,8 +65,8 @@ impl Adsr {
 			Attack => {
 				self.position += self.atk_inc * dt;
 
-				if self.position >= 1.0 {
-					self.position = 1.0;
+				if self.position >= self.gain_lvl {
+					self.position = self.position.min(1.0);
 					Decay
 				} else {
 					Attack
@@ -67,8 +78,8 @@ impl Adsr {
 
 				if gate.is_rising_edge() {
 					Attack
-				} else if self.position <= self.sus_lvl {
-					self.position = self.sus_lvl;
+				} else if self.position <= self.sus_lvl*self.gain_lvl {
+					self.position = self.position.max(self.sus_lvl*self.gain_lvl);
 					Sustain
 				} else {
 					Decay
@@ -102,7 +113,7 @@ impl Adsr {
 		let sample = self.position;
 		let gate = self.gate.update(value);
 		self.update(gate, sample_dt);
-		sample
+		sample * sample
 	}
 }
 
